@@ -99,3 +99,43 @@ forecast::dm.test(liquor_errs$arima, liquor_errs$snaive, h = 1, power = 2)
 # As the liquor store chain, I would use the ARIMA model
 
 # 3 Forecast Combination
+liquor_combo_fc <- liquor_cv_fit |>
+  mutate(combo = (arima + ets) / 2) |>
+  forecast(h = 1)
+
+liquor_combo_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE))
+liquor_combo_fc |>
+  accuracy(liquor, measures = list(RMSE = RMSE, MAE = MAE)) |>
+  select(.model, RMSE, MAE) |>
+  knitr::kable(digits = 2)
+# Combo RMSE and MAE is slightly higher than the errors of the ARIMA model, and lower than the ETS model, showing that the ARIMA model is once again the best choice for minimizing error
+cor(liquor_errs$arima, liquor_errs$ets)
+# Based off of the DM test of -2.9062 for ARIMA and ETS, and a correlation of .87 for the combo of ARIMA and ETS, the combo did not beat ARIMA because ETS is more inaccurate than ARIMA, therefore dragging down ARIMA's accuracy when the errors are combined, and also they are closely correlated so they will be wrong in the same spots, which does not improve the combo.
+
+# 4.1 The Data
+qd_raw <- read_csv("data/fredqd_2026-09.csv", show_col_types = FALSE) |>
+  slice(-(1:2))
+
+growth <- function(x) 100 * difference(log(x))
+
+qd <- qd_raw |>
+  mutate(date = as.Date(sasdate, "%m/%d/%Y")) |>
+  transmute(date,
+            gdp    = growth(GDPC1),     # real GDP
+            cons   = growth(PCECC96),   # real consumption
+            inv    = growth(GPDIC1),    # real investment
+            emp    = growth(PAYEMS),    # payroll employment
+            infl   = growth(GDPCTPI),   # GDP price index
+            unrate = difference(UNRATE),     # unemployment rate
+            ffr    = difference(FEDFUNDS),   # federal funds rate
+            gs10   = difference(GS10)) |>    # 10-year Treasury yield
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+y <- qd |> select(-date) |> as.matrix()
+
+nrow(y)
+head(y)
+N <- nrow(y)
+origins <- 120:(N - 1)
+actual <- y[121:N, ]
