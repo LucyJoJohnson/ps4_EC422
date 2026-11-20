@@ -139,3 +139,75 @@ head(y)
 N <- nrow(y)
 origins <- 120:(N - 1)
 actual <- y[121:N, ]
+# We will produce 120 forecasts for each variable ((2019-1990) times 4, plus 4). The first forecast will be Q1 1990, and the last forecast will be Q4 December 2019
+
+# 4.2 OLS VARS
+var_ols_fc <- function(z, p) {
+  e <- embed(z, p + 1)            # columns: y_t, then its lags 1 to p
+  M <- ncol(z)                    # number of variables
+  B <- coef(lm(e[, 1:M] ~ e[, -(1:M)]))
+  x <- c(1, t(z[nrow(z):(nrow(z) - p + 1), ]))   # constant, latest p lags
+  x %*% B
+}
+
+fc_var1 <- NULL
+fc_var4 <- NULL
+for (T in origins) {
+  fc_var1 <- rbind(fc_var1, var_ols_fc(y[1:T, ], 1))
+  fc_var4 <- rbind(fc_var4, var_ols_fc(y[1:T, ], 4))
+}
+rmse_by_var <- function(f) sqrt(colMeans((actual - f)^2))
+
+rmse_by_var(fc_var1)
+rmse_by_var(fc_var4)
+# On the whole var1 forecasts better, for 7 out of the 8 variables, everything except for GDP price index. The smaller model might forecast better because it is less complicated and does not over fit the model. Less parameters produce less forecast error, so the forecasting for var1 is better.
+
+# 4.3 A BVAR
+bvar_cv <- function(lambda) {
+  pr <- bv_priors(hyper = "lambda",
+                  mn = bv_mn(lambda = bv_lambda(mode = lambda, sd = 0.4,
+                                                min = 0.999 * lambda,
+                                                max = 1.001 * lambda),
+                             b = 0))
+  fc <- NULL
+  for (T in origins) {
+    fit_T <- bvar(y[1:T, ], lags = 4, priors = pr,
+                  n_draw = 2000, n_burn = 1000, verbose = FALSE)
+    x <- c(1, t(y[T:(T - 3), ]))         # constant and 4 lags of each variable
+    fc <- rbind(fc, x %*% coef(fit_T))   # forecast of y_{T+1}
+  }
+  fc
+}
+
+set.seed(422)
+fc_bvar_03 <- bvar_cv(0.3)
+saveRDS(fc_bvar_03, "results/fc_bvar_03.rds")
+
+set.seed(422)
+fc_bvar_005 <- bvar_cv(0.05)
+
+var_results <- tibble(
+  Variable = colnames(y),
+  `VAR(1)` = rmse_by_var(fc_var1),
+  `VAR(4)` = rmse_by_var(fc_var4),
+  `BVAR(4), lambda = 0.3` = rmse_by_var(fc_bvar_03),
+  `BVAR(4), lambda = 0.05` = rmse_by_var(fc_bvar_005)
+)
+
+saveRDS(var_results, "results/var_results.rds")
+
+var_results |> knitr::kable(digits = 3)
+# All of the values of the BVAR lambda 0.3 are lower than the VAR4 values. This difference is explained by the Minnesota prior which gives more weight to shorter lags by shrinking the longer lags more, which leads to a lower variance. 
+# Compared with VAR1, 5 values of the BVAR are greater and 3 are less than the VAR1, so the BVAR forecasting is less accurate than the VAR1
+# BVAR with lambda at .05 is less accurate than 7 out of the 8 variables of VAR1, but more accurate than 3 out of the 8 variables for VAR4. This tells me that the amount of sjrinkage is too much. I think the winner is VAR1, and I think that its RMSE is a fair estimate of how accurately it will forecast in the future because the model does not have too many variables and is not being shrunk by a prior. This will lead to less approximation error, and also has enough variables to lead to less estimation error.
+
+e_var4 <- actual[, "gdp"] - fc_var4[, 1]
+e_bvar <- actual[, "gdp"] - fc_bvar_03[, 1]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+
+e_var4 <- actual[, "infl"] - fc_var4[, 5]
+e_bvar <- actual[, "infl"] - fc_bvar_03[, 5]
+
+forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
+# For GDP, there is enough evidence to reject the null and conclude that VAR4 and BVAR lambda .3 are not equally accurate. For GDP price index (infl), there is not enough evidence to concluce that VAR4 and BVAR mabda .3 are not equally accurate, so we fail to reject the null. I think that this does not change my results of the part above because I don't think either of these options are the best for forecasting accurately. If anything the similarity between the GDP price index and the GDP, which are both higher than the GDP error for VAR1, shows me that both VAR4 and BVAR .3 are more inaccurate.
