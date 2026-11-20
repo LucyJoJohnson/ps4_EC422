@@ -211,3 +211,94 @@ e_bvar <- actual[, "infl"] - fc_bvar_03[, 5]
 
 forecast::dm.test(e_var4, e_bvar, h = 1, power = 2)
 # For GDP, there is enough evidence to reject the null and conclude that VAR4 and BVAR lambda .3 are not equally accurate. For GDP price index (infl), there is not enough evidence to concluce that VAR4 and BVAR mabda .3 are not equally accurate, so we fail to reject the null. I think that this does not change my results of the part above because I don't think either of these options are the best for forecasting accurately. If anything the similarity between the GDP price index and the GDP, which are both higher than the GDP error for VAR1, shows me that both VAR4 and BVAR .3 are more inaccurate.
+
+# 5.1 The Data
+md_raw <- read_csv("data/fredmd_2026-09.csv", show_col_types = FALSE)
+tcode <- unlist(md_raw[1, -1])
+md <- md_raw[-1, ] |> mutate(date = as.Date(sasdate, "%m/%d/%Y"))
+
+transform_series <- function(x, code) {
+  d <- function(v) c(NA, diff(v))
+  switch(as.character(code),
+         "1" = x,                      # level
+         "2" = d(x),                   # first difference
+         "3" = d(d(x)),                # second difference
+         "4" = log(x),                 # log
+         "5" = 100 * d(log(x)),        # growth rate
+         "6" = 100 * d(d(log(x))),     # change in the growth rate
+         "7" = d(x / dplyr::lag(x) - 1))
+}
+fm <- map2_dfc(md[names(tcode)], tcode, transform_series) |>
+  mutate(date = md$date, .before = 1) |>
+  filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+
+fm <- fm[, colSums(is.na(fm)) == 0]
+
+dim(fm)
+tcode[c("INDPRO", "PAYEMS", "CPIAUCSL", "FEDFUNDS")]
+# INDPRO has a growth rate transformation, PAYEMS has a growth rate transformation, CPIAUCSL has a change in the growth rate transformation, and FEDFUNDS has a first difference tranformation. FEDFUNDS transformation is different than INDPROs because FEDFUNDS is already a rate, while INDPRO is a quantity that grows. Both tranformations intend for the data to be more stationary than before.
+
+# 5.2 Estimate the Factors
+Z <- fm |> select(-date) |> as.matrix()
+
+pc <- prcomp(scale(Z))
+
+summary(pc)$importance[, 1:5]
+# The third factors cumulative proportion is 29.5%, so the first 3 factors explain about 29.5% of the variation.
+F1 <- pc$x[, 1] * sign(cor(pc$x[, 1], fm$INDPRO))
+
+tibble(date = fm$date, F1 = F1) |>
+  ggplot(aes(date, F1)) +
+  geom_line() +
+  labs(title = "First Factor from FRED-MD", x = NULL, y = NULL) +
+  theme_minimal()
+sort(abs(cor(pc$x[, 1], Z))[1, ], decreasing = TRUE)[1:8]
+sort(abs(cor(pc$x[, 2], Z))[1, ], decreasing = TRUE)[1:8]
+# The series most correlated with Factor 1 are PAYEMS and IPNAMSICS. This factor captures employment (non-seasonally adjusted) and industrial production. The series most correlated with factor 2 are CUSR0000SAC and DNDGRG3M086SBEA. This factor captures more GDP related things like CPI and personal consumption expenditures for non-durable goods. 
+
+# 5.3 Replicate the Horse Race from Class
+ip <- fm$INDPRO
+n <- nrow(Z)
+init <- which(fm$date == as.Date("1989-12-01"))
+
+e_ar <- NULL
+e_fa <- NULL
+for (T in init:(n - 1)) {
+  F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:3]         # factors using data through T
+  d <- data.frame(y_next = ip[2:T], y = ip[1:(T - 1)], F_T[1:(T - 1), ])
+  new <- data.frame(y = ip[T], t(F_T[T, ]))
+  e_ar <- c(e_ar, ip[T + 1] - predict(lm(y_next ~ y, d), new))
+  e_fa <- c(e_fa, ip[T + 1] - predict(lm(y_next ~ ., d), new))
+}
+
+c(RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)))
+# The RMSEs are the same! It would be cheating to estimate the factors once with the full sample because at the time of forecasting at each quarter, forecasters are not supposed to know what happened in the future, so estimating the factors with the full sample creates estimates that are drawn from future values, which messes up the actual forecast as it would have happened in real time. This causes forecast error.
+
+# 5.4 A Direct Forecast of Inflation
+direct_race <- function(series, h = 12, r = 3) {
+  lv <- md |>
+    mutate(log_x = log(.data[[series]]),
+           g = 100 * (log_x - lag(log_x))) |>
+    filter(date >= as.Date("1960-03-01"), date <= as.Date("2019-12-01"))
+  yh <- 100 * (lead(lv$log_x, h) - lv$log_x)      # growth over the next h months
+  g  <- lv$g                                      # growth over the latest month
+  
+  e_ar <- NULL
+  e_fa <- NULL
+  for (T in init:(n - h)) {
+    F_T <- prcomp(scale(Z[1:T, ]))$x[, 1:r, drop = FALSE]
+    i <- 1:(T - h)
+    d <- data.frame(yh = yh[i], g = g[i], F_T[i, , drop = FALSE])
+    new <- data.frame(g = g[T], F_T[T, , drop = FALSE])
+    e_ar <- c(e_ar, yh[T] - predict(lm(yh ~ g, d), new))
+    e_fa <- c(e_fa, yh[T] - predict(lm(yh ~ ., d), new))
+  }
+  tibble(series, forecasts = length(e_ar),
+         RMSE_AR = sqrt(mean(e_ar^2)), RMSE_FA = sqrt(mean(e_fa^2)),
+         MAE_AR = mean(abs(e_ar)), MAE_FA = mean(abs(e_fa)),
+         DM_pvalue = forecast::dm.test(e_ar, e_fa, h = h, power = 2,
+                                       varestimator = "bartlett")$p.value)
+}
+
+direct_race("CPIAUCSL")
+# Yes the factors improve the forecast of the 12 month CPI inflation. The RMSE change is from 2.11 to 1.89, which is a 10.4% change. The DM test p-value is less than 1%, so this difference is statistically significant. We reject the null that the errors are equally accurate.
